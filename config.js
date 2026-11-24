@@ -15,5 +15,6 @@ module.exports = {
     AP_WALLET: 'ApWa11etSo1anaAddressWhiteListed111111111111111',
     REDEMPTION_WALLET: 'XstocksRedemption1Wa11etSo1ana1111111111111',
   },
-  ISSUER_API_KEY: 'issuer-secret-key', // used later for optional X-API-KEY checks
+  // Static key the Issuer requires in X-API-KEY on every endpoint except /health. Override with env ISSUER_API_KEY.
+  ISSUER_API_KEY: process.env.ISSUER_API_KEY || 'issuer-secret-key',
 };
