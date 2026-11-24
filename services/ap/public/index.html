@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>AP - Tokenized Stock Mint & Redeem</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{font-family:system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;color:#222}
+ h1{font-size:1.4rem} section{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}
+ table{border-collapse:collapse;width:100%} td,th{text-align:left;padding:.3rem .5rem;border-bottom:1px solid #eee;font-size:.9rem}
+ button{padding:.5rem 1.2rem;margin-right:.5rem} input,select{padding:.4rem;margin-right:.5rem}
+ .muted{color:#777;font-size:.9rem} .pending{color:#b36b00} .completed{color:#087f23} .rejected{color:#c62828}
+ #msg{margin-top:.6rem;font-size:.9rem}
+</style></head><body>
+<h1>Authorized Participant</h1>
+<div class="muted" id="acct"></div>
+<section>
+ <select id="sym"><option>AAPL</option><option>TSLA</option></select> <span class="muted">(redeem uses AAPLx / TSLAx of the same symbol)</span><br><br>
+ <input id="qty" value="1" size="12" title="quantity (max 9 decimals)">
+ <button id="mint">Mint</button><button id="redeem">Redeem</button>
+ <div id="msg"></div>
+</section>
+<section><h3>Share balances (Alpaca)</h3><table id="shares"></table></section>
+<section><h3>Token balances (Issuer)</h3><table id="tokens"></table></section>
+<section><h3>Redemptions at Issuer (token transfer, burn, callback)</h3><table id="reds"><tr><td class="muted">none yet</td></tr></table></section>
+<section><h3>Tokenization requests (Alpaca)</h3><table id="reqs"><tr><td class="muted">none yet</td></tr></table></section>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const rows = (o) => Object.entries(o).map(([k,v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('') || '<tr><td class="muted">none</td></tr>';
+async function load(){
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    $('acct').textContent = `account ${cfg.account_id} | wallet ${cfg.wallet} (${cfg.network})`;
+    const b = await (await fetch('/api/balances')).json();
+    if (b.shares) { $('shares').innerHTML = rows(Object.fromEntries(b.shares.map(p => [p.symbol, p.qty]))); $('tokens').innerHTML = rows(b.tokens.balances); }
+    else { $('shares').innerHTML = $('tokens').innerHTML = `<tr><td>${esc(b.message)}</td></tr>`; }
+    const r = await (await fetch('/api/requests')).json();
+    if (Array.isArray(r) && r.length) $('reqs').innerHTML = '<tr><th>time</th><th>id</th><th>type</th><th>asset</th><th>status</th><th>step</th><th>reason / note</th></tr>' +
+      r.map(x => `<tr><td>${esc(x.created_at.slice(11,19))}</td><td>${esc(x.tokenization_request_id.slice(0,8))}</td><td>${esc(x.type)}</td><td>${esc(x.qty)} ${esc(x.token_symbol)}</td><td class="${esc(x.status)}"><b>${esc(x.status)}</b></td><td>${esc(x.step)}</td><td>${esc(x.reason || x.last_error || (x.issuer_tx_hash ? 'tx ' + x.issuer_tx_hash.slice(0,12) + '...' : ''))}</td></tr>`).join('');
+    const d = await (await fetch('/api/redemptions')).json();
+    if (Array.isArray(d) && d.length) $('reds').innerHTML = '<tr><th>time</th><th>id</th><th>amount</th><th>status</th><th>reason / tx</th></tr>' +
+      d.map(x => `<tr><td>${esc(x.created_at.slice(11,19))}</td><td>${esc(x.id.slice(0,8))}</td><td>${esc(x.qty)} ${esc(x.token_symbol)}</td><td class="${x.status==='rejected'||x.status==='callback_failed'?'rejected':x.status==='notified'?'completed':'pending'}"><b>${esc(x.status)}</b></td><td>${esc(x.reason || (x.needs_attention ? 'NEEDS ATTENTION: ' : '') + (x.callback_error || '') || (x.tx_hash ? 'tx ' + x.tx_hash.slice(0,12) + '...' : ''))}</td></tr>`).join('');
+  } catch (e) { $('acct').textContent = 'AP backend unreachable: ' + e.message; }
+}
+$('mint').onclick = async () => {
+  const res = await fetch('/api/mint', { method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({ underlying_symbol: $('sym').value, qty: $('qty').value }) });
+  const b = await res.json();
+  $('msg').className = res.ok ? 'pending' : 'rejected';
+  $('msg').textContent = res.ok ? `Mint submitted (${b.tokenization_request_id.slice(0,8)}), status ${b.status}` : `Rejected: ${b.reason || b.message}`;
+  load();
+};
+$('redeem').onclick = async () => {
+  $('redeem').disabled = true; // double-click guard; the server also dedupes on client_ref
+  const res = await fetch('/api/redeem', { method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({ token_symbol: $('sym').value + 'x', qty: $('qty').value, client_ref: crypto.randomUUID() }) });
+  const b = await res.json(); $('redeem').disabled = false;
+  $('msg').className = res.ok ? 'pending' : 'rejected';
+  $('msg').textContent = res.ok ? `Redeem submitted: tokens sent to redemption wallet (tx ${b.tx_hash.slice(0,12)}...)` : `Rejected: ${b.reason || b.message}`;
+  load();
+};
+load(); setInterval(load, 1000);
+</script></body></html>
