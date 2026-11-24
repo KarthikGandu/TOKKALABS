@@ -1,0 +1,20 @@
+{
+  "name": "tokka-tokenization-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local simulation of Alpaca's Instant Tokenization Network: AP, Alpaca and Issuer as three HTTP services",
+  "scripts": {
+    "start": "node scripts/start-all.js",
+    "start:ap": "node services/ap/server.js",
+    "start:alpaca": "node services/alpaca/server.js",
+    "start:issuer": "node services/issuer/server.js",
+    "test": "node scripts/smoke.js",
+    "demo": "bash scripts/demo.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
