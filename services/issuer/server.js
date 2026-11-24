@@ -2,9 +2,9 @@
 // whitelisted wallets, token balances, mint records and fake tx hashes.
 const crypto = require('crypto');
 const express = require('express');
-const { PORTS, URLS, IDS } = require('../../config');
+const { PORTS, URLS, IDS, ISSUER_API_KEY } = require('../../config');
 const D = require('../../lib/decimal');
-const { call, sleep } = require('../../lib/http');
+const { call, sleep, recent } = require('../../lib/http');
 
 const RETRY_MS = Number(process.env.RETRY_MS ?? 1000);
 const STEP_DELAY = Number(process.env.STEP_DELAY_MS ?? 300);
@@ -93,7 +93,29 @@ async function deliverCallback(m) {
 const app = express();
 app.use(express.json());
 
+// Static API key on every Issuer endpoint except /health (Alpaca and the AP send it; see lib/http.js).
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+  if (req.get('X-API-KEY') !== ISSUER_API_KEY) return res.status(401).json({ message: 'invalid or missing X-API-KEY' });
+  next();
+});
+
 app.get('/health', (_req, res) => res.json({ service: 'issuer', status: 'ok' }));
+app.get('/logs', (_req, res) => res.json(recent())); // cross-service calls made by the Issuer (live log)
+
+// Account linking (Alpaca calls this at startup). Idempotent: an already linked account is a no-op.
+app.post('/tokenization/accounts/connect', (req, res) => {
+  const { account_id, wallet_address } = req.body || {};
+  if (!account_id) return res.status(400).json({ message: 'account_id required' });
+  const existing = [...aps.values()].find((a) => a.alpaca_account_id === account_id);
+  if (existing) return res.json({ status: 'already_connected', ap_id: existing.id, wallets: existing.wallets });
+  if (!wallet_address) return res.status(400).json({ message: 'wallet_address required to register a new AP' });
+  if ([...aps.values()].some((a) => a.wallets.includes(wallet_address))) return res.status(409).json({ message: 'wallet already whitelisted for another AP' });
+  const id = `ap-${String(aps.size + 1).padStart(3, '0')}`;
+  aps.set(id, { id, alpaca_account_id: account_id, status: 'REGISTERED', wallets: [wallet_address] });
+  if (!wallets.has(wallet_address)) wallets.set(wallet_address, { AAPLx: 0n, TSLAx: 0n });
+  res.status(201).json({ status: 'connected', ap_id: id, wallets: [wallet_address] });
+});
 app.get('/tokenization/issuer', (_req, res) => res.json(issuer));
 app.get('/tokenization/tokens', (_req, res) => res.json(supportedTokens));
 
