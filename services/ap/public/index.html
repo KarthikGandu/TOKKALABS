@@ -21,6 +21,8 @@
 <section><h3>Token balances (Issuer)</h3><table id="tokens"></table></section>
 <section><h3>Redemptions at Issuer (token transfer, burn, callback)</h3><table id="reds"><tr><td class="muted">none yet</td></tr></table></section>
 <section><h3>Tokenization requests (Alpaca)</h3><table id="reqs"><tr><td class="muted">none yet</td></tr></table></section>
+<section><h3>Live cross-service log <label class="muted"><input type="checkbox" id="poll"> show background polling</label></h3>
+ <pre id="log" style="max-height:260px;overflow:auto;font-size:.8rem;background:#111;color:#ddd;padding:.6rem;border-radius:6px;margin:0"></pre></section>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -41,9 +43,10 @@ async function load(){
   } catch (e) { $('acct').textContent = 'AP backend unreachable: ' + e.message; }
 }
 $('mint').onclick = async () => {
+  $('mint').disabled = true; // double-click guard; the server also dedupes on the Idempotency-Key
   const res = await fetch('/api/mint', { method: 'POST', headers: {'content-type':'application/json'},
-    body: JSON.stringify({ underlying_symbol: $('sym').value, qty: $('qty').value }) });
-  const b = await res.json();
+    body: JSON.stringify({ underlying_symbol: $('sym').value, qty: $('qty').value, idempotency_key: crypto.randomUUID() }) });
+  const b = await res.json(); $('mint').disabled = false;
   $('msg').className = res.ok ? 'pending' : 'rejected';
   $('msg').textContent = res.ok ? `Mint submitted (${b.tokenization_request_id.slice(0,8)}), status ${b.status}` : `Rejected: ${b.reason || b.message}`;
   load();
@@ -57,5 +60,12 @@ $('redeem').onclick = async () => {
   $('msg').textContent = res.ok ? `Redeem submitted: tokens sent to redemption wallet (tx ${b.tx_hash.slice(0,12)}...)` : `Rejected: ${b.reason || b.message}`;
   load();
 };
-load(); setInterval(load, 1000);
+async function loadLog(){
+  try {
+    const l = await (await fetch('/api/logs' + ($('poll').checked ? '?polling=1' : ''))).json();
+    const col = (st) => st === 'ERR' || st >= 500 ? '#ff6b6b' : st >= 400 ? '#ffb454' : '#7ee787';
+    $('log').innerHTML = l.slice().reverse().map(c => `${esc(c.ts.slice(11,23))}  ${esc(c.from)} -> ${esc(c.to)}  ${esc(c.method)} ${esc(c.path)}  <span style="color:${col(c.status)}">${esc(c.status)}</span> ${esc(c.ms)}ms`).join('\n') || 'no calls yet - press Mint or Redeem';
+  } catch (e) { /* ignore */ }
+}
+load(); loadLog(); setInterval(load, 1000); setInterval(loadLog, 1000);
 </script></body></html>

@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const { PORTS, URLS, IDS } = require('../../config');
-const { call } = require('../../lib/http');
+const { call, recent } = require('../../lib/http');
 
 const app = express();
 app.use(express.json());
@@ -20,8 +20,8 @@ app.get('/api/config', (_req, res) =>
 app.get('/api/balances', async (_req, res) => {
   try {
     const [shares, tokens] = await Promise.all([
-      call('ap', 'GET', `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/positions`),
-      call('ap', 'GET', `${URLS.issuer}/tokenization/wallets/${IDS.AP_WALLET}/balances`),
+      call('ap', 'GET', `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/positions`, undefined, { quiet: true }),
+      call('ap', 'GET', `${URLS.issuer}/tokenization/wallets/${IDS.AP_WALLET}/balances`, undefined, { quiet: true }),
     ]);
     res.json({ shares: shares.body, tokens: tokens.body });
   } catch (e) { upstream(res, e); }
@@ -29,7 +29,7 @@ app.get('/api/balances', async (_req, res) => {
 
 app.get('/api/requests', async (_req, res) => {
   try {
-    const r = await call('ap', 'GET', `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/tokenization/requests`);
+    const r = await call('ap', 'GET', `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/tokenization/requests`, undefined, { quiet: true });
     res.status(r.status).json(r.body);
   } catch (e) { upstream(res, e); }
 });
@@ -42,7 +42,7 @@ app.post('/api/mint', async (req, res) => {
     const r = await call('ap', 'POST', `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/tokenization/mint`, {
       underlying_symbol: b.underlying_symbol, qty: b.qty, token_symbol: b.token_symbol,
       network: b.network ?? 'solana', wallet_address: b.wallet_address ?? IDS.AP_WALLET, issuer_id: IDS.ISSUER_ID,
-    });
+    }, { headers: { 'Idempotency-Key': b.idempotency_key ?? crypto.randomUUID() } });
     res.status(r.status).json(r.body);
   } catch (e) { upstream(res, e); }
 });
@@ -64,9 +64,19 @@ app.post('/api/redeem', async (req, res) => {
 // Issuer-side view of this wallet's redemptions (covers the window before Alpaca has the redeem request)
 app.get('/api/redemptions', async (_req, res) => {
   try {
-    const r = await call('ap', 'GET', `${URLS.issuer}/tokenization/redemptions?wallet=${IDS.AP_WALLET}`);
+    const r = await call('ap', 'GET', `${URLS.issuer}/tokenization/redemptions?wallet=${IDS.AP_WALLET}`, undefined, { quiet: true });
     res.status(r.status).json(r.body);
   } catch (e) { upstream(res, e); }
+});
+
+// Live log: every cross-service call made by AP, Alpaca and the Issuer, merged by time.
+// Background polling is hidden unless ?polling=1.
+app.get('/api/logs', async (req, res) => {
+  const fetchLogs = (url) => call('ap', 'GET', url, undefined, { quiet: true }).then((r) => (r.ok ? r.body : [])).catch(() => []);
+  const [alpaca, issuer] = await Promise.all([fetchLogs(`${URLS.alpaca}/logs`), fetchLogs(`${URLS.issuer}/logs`)]);
+  let all = [...recent(), ...alpaca, ...issuer].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  if (req.query.polling !== '1') all = all.filter((c) => !c.quiet);
+  res.json(all.slice(-150));
 });
 
 if (require.main === module) {
