@@ -4,10 +4,12 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const assert = require('assert');
-const { URLS, IDS } = require('../config');
+const { URLS, IDS, ISSUER_API_KEY } = require('../config');
 
 const send = async (method, url, body) => {
-  const r = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const headers = { 'content-type': 'application/json' };
+  if (url.startsWith(URLS.issuer)) headers['X-API-KEY'] = ISSUER_API_KEY; // the Issuer requires its static key
+  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   return { status: r.status, body: await r.json().catch(() => null) };
 };
 const get = (url) => send('GET', url);
@@ -339,6 +341,85 @@ check('REGRESSION duplicate transfers prevented: client_ref required, concurrent
   const burned = (await get(`${URLS.issuer}/tokenization/redemptions?wallet=${IDS.AP_WALLET}`)).body.filter((x) => x.id === a.body.redemption_id);
   assert.strictEqual(burned.length, 1);
 });
+
+// ---------------- phase 4: optional extras ----------------
+check('X-API-KEY: issuer rejects missing/wrong key (401), /health stays open, valid key works', async () => {
+  const raw = (path, key) => fetch(`${URLS.issuer}${path}`, { headers: key ? { 'X-API-KEY': key } : {} });
+  assert.strictEqual((await raw('/tokenization/tokens')).status, 401);
+  assert.strictEqual((await raw('/tokenization/tokens', 'wrong-key')).status, 401);
+  assert.strictEqual((await raw('/tokenization/wallets/x/balances')).status, 401);
+  assert.strictEqual((await fetch(`${URLS.issuer}/tokenization/mint/confirm`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.strictEqual((await fetch(`${URLS.issuer}/tokenization/transfers`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.strictEqual((await fetch(`${URLS.issuer}/admin/faults`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
+  assert.strictEqual((await raw('/health')).status, 200);
+  assert.strictEqual((await raw('/tokenization/tokens', ISSUER_API_KEY)).status, 200);
+});
+check('ACCOUNT CONNECT: Alpaca linked the AP at startup; connect is idempotent and guards wallets', async () => {
+  const end = Date.now() + 5000; let link;
+  while (Date.now() < end && !link) {
+    link = (await get(`${URLS.alpaca}/logs`)).body.find((c) => c.method === 'POST' && c.path === '/tokenization/accounts/connect' && c.status === 200);
+    if (!link) await sleep(100);
+  }
+  assert.ok(link, 'alpaca called POST /tokenization/accounts/connect at startup');
+  const url = `${URLS.issuer}/tokenization/accounts/connect`;
+  const again = await post(url, { account_id: IDS.AP_ACCOUNT, wallet_address: IDS.AP_WALLET });
+  assert.strictEqual(again.status, 200); assert.strictEqual(again.body.status, 'already_connected');
+  const fresh = await post(url, { account_id: 'ap-account-002', wallet_address: 'NewApWallet222' });
+  assert.strictEqual(fresh.status, 201); assert.strictEqual(fresh.body.status, 'connected');
+  assert.strictEqual((await post(url, { account_id: 'ap-account-002', wallet_address: 'NewApWallet222' })).body.status, 'already_connected');
+  assert.strictEqual((await post(url, { account_id: 'ap-account-003', wallet_address: IDS.AP_WALLET })).status, 409);
+  assert.strictEqual((await post(url, { account_id: 'ap-account-004' })).status, 400);
+  assert.deepStrictEqual(await tokens('NewApWallet222'), { AAPLx: '0', TSLAx: '0' });
+});
+check('IDEMPOTENCY-KEY on mint: replay, concurrent duplicates and body mismatch', async () => {
+  const url = `${URLS.alpaca}/v1/accounts/${IDS.AP_ACCOUNT}/tokenization/mint`;
+  const raw = (key, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
+  const before = await shares(IDS.AP_ACCOUNT); const tokBefore = toUnits((await tokens()).AAPLx);
+  // 3 concurrent requests with the same key -> one mint request
+  const rs = await Promise.all([1, 2, 3].map(() => raw('idem-1', mintBody({ qty: '1' }))));
+  const bodies = await Promise.all(rs.map((r) => r.json()));
+  assert.ok(rs.every((r) => r.status === 200));
+  assert.strictEqual(new Set(bodies.map((b) => b.tokenization_request_id)).size, 1, 'one request for three calls');
+  assert.deepStrictEqual(rs.map((r) => r.headers.get('idempotent-replay')).sort(), ['false', 'true', 'true']);
+  const id = bodies[0].tokenization_request_id;
+  assert.strictEqual((await finished(id)).status, 'completed');
+  // replay after completion returns the same (now completed) request and moves nothing
+  const late = await raw('idem-1', mintBody({ qty: '1' }));
+  const lateBody = await late.json();
+  assert.strictEqual(lateBody.tokenization_request_id, id); assert.strictEqual(lateBody.status, 'completed');
+  assert.strictEqual(late.headers.get('idempotent-replay'), 'true');
+  // same key, different body -> 409
+  assert.strictEqual((await raw('idem-1', mintBody({ qty: '2' }))).status, 409);
+  await sleep(300);
+  assert.strictEqual(toUnits((await shares(IDS.AP_ACCOUNT)).AAPL), toUnits(before.AAPL) - 10n ** 9n, 'shares moved once');
+  assert.strictEqual(toUnits((await tokens()).AAPLx), tokBefore + 10n ** 9n, 'tokens credited once');
+  // replayed validation rejection is stable too; a different key is a new request
+  const r1 = await raw('idem-bad', mintBody({ qty: '1000' })); const r2 = await raw('idem-bad', mintBody({ qty: '1000' }));
+  assert.strictEqual(r1.status, 422); assert.strictEqual(r2.status, 422);
+  assert.strictEqual((await r1.json()).tokenization_request_id, (await r2.json()).tokenization_request_id);
+  const other = await raw('idem-2', mintBody({ qty: '1' })); const ob = await other.json();
+  assert.notStrictEqual(ob.tokenization_request_id, id);
+  assert.strictEqual((await finished(ob.tokenization_request_id)).status, 'completed');
+  // keys are scoped to the request: AP page mints use a fresh key each, so two identical clicks are two mints
+  assert.deepStrictEqual(await shares(IDS.AP_ACCOUNT), { AAPL: '7', TSLA: '4.499999999' });
+});
+check('LIVE LOG: every cross-service call is visible, polling hidden by default, issuer log needs the key', async () => {
+  const m = await post(`${URLS.ap}/api/mint`, { underlying_symbol: 'TSLA', qty: '0.5' });
+  await finished(m.body.tokenization_request_id);
+  await sleep(300);
+  const log = (await get(`${URLS.ap}/api/logs`)).body;
+  const has = (from, to, method, re) => log.some((c) => c.from === from && c.to === to && c.method === method && re.test(c.path));
+  assert.ok(has('AP', 'Alpaca', 'POST', /\/tokenization\/mint$/), 'AP -> Alpaca mint');
+  assert.ok(has('Alpaca', 'Issuer', 'GET', /\/tokenization\/tokens$/), 'Alpaca -> Issuer tokens');
+  assert.ok(has('Alpaca', 'Issuer', 'POST', /\/tokenization\/mint$/), 'Alpaca -> Issuer mint');
+  assert.ok(has('Alpaca', 'Issuer', 'POST', /\/tokenization\/mint\/confirm$/), 'Alpaca -> Issuer confirm');
+  assert.ok(has('Issuer', 'Alpaca', 'POST', /\/callback\/mint$/), 'Issuer -> Alpaca callback');
+  assert.ok(log.every((c) => !c.quiet), 'background polling hidden by default');
+  assert.ok(log.every((c, i) => i === 0 || log[i - 1].ts <= c.ts), 'time ordered');
+  const withPolling = (await get(`${URLS.ap}/api/logs?polling=1`)).body;
+  assert.ok(withPolling.some((c) => c.quiet && /positions|balances|requests/.test(c.path)), 'polling visible on request');
+  assert.strictEqual((await fetch(`${URLS.issuer}/logs`)).status, 401);
+});
 check('FINAL CONSERVATION across mint + redeem: nothing double-counted or lost', async () => {
   const ap = await shares(IDS.AP_ACCOUNT), is = await shares(IDS.ISSUER_ACCOUNT), supply = (await get(`${URLS.issuer}/tokenization/supply`)).body;
   assert.strictEqual(toUnits(ap.AAPL) + toUnits(is.AAPL), 10n * 10n ** 9n);
@@ -346,9 +427,9 @@ check('FINAL CONSERVATION across mint + redeem: nothing double-counted or lost',
   assert.strictEqual(toUnits(supply.AAPLx), toUnits(is.AAPL));
   assert.strictEqual(toUnits(supply.TSLAx), toUnits(is.TSLA));
   assert.deepStrictEqual(await redemptionWallet(), { AAPLx: '0', TSLAx: '0' });
-  assert.deepStrictEqual(ap, { AAPL: '9', TSLA: '4.499999999' });
-  assert.deepStrictEqual(is, { AAPL: '1', TSLA: '0.500000001' });
-  assert.deepStrictEqual(await tokens(), { AAPLx: '1', TSLAx: '0.500000001' });
+  assert.deepStrictEqual(ap, { AAPL: '7', TSLA: '3.999999999' });
+  assert.deepStrictEqual(is, { AAPL: '3', TSLA: '1.000000001' });
+  assert.deepStrictEqual(await tokens(), { AAPLx: '3', TSLAx: '1.000000001' });
   const all = await alpacaRequests(); // every request reached a terminal state
   assert.ok(all.every((r) => r.status !== 'pending'), 'no request left pending');
 });
