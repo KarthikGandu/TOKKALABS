@@ -21,7 +21,8 @@
 - [x] Mint behaviour preserved (all 18 mint-era checks still pass unchanged)
 - [x] `npm test`: 27/27 pass, 3 consecutive runs. New: redeem 2 AAPLx, concurrent mint+redeem and mint->redeem round trip, over-balance + 5 other rejections, 3 callback failure scenarios, idempotency, final conservation
 - [x] Hardening (2026-11-23): `callback_failed` record preserved + `retry-callback` recovery; `client_ref` required/deduped; UI double-click guard; 2 regression tests; `npm test` 29/29 x3
-- [ ] Phase 4 (next)
+- [x] Phase 4 optional extras (2026-11-23): X-API-KEY on Issuer, Idempotency-Key on mint, live log (ring buffer + /logs + AP /api/logs + page panel), account connect at startup, step delay already present, confirm idempotency already present
+- [x] `npm test`: 33/33 pass x3; `npm run demo` updated (sections 8-9 show the extras)
 
 ## Not yet done
-Extras (API key, Idempotency-Key, live log, `/accounts/connect`), verify payloads vs real guides, GitHub repo, prompt log, final "changed/rejected" note.
+Verify payload field names against the real Alpaca guides, prompt log, final "changed/rejected" note, add interviewer as collaborator, make repo private.

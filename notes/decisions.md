@@ -29,6 +29,12 @@
 | 25 | `client_ref` required on `/tokenization/transfers`; fingerprint mismatch -> 409; registered synchronously | Duplicate transfers (double click, client retry, concurrent) cannot move tokens twice |
 | 26 | No automatic retry of permanent failures | A 4xx will not fix itself; a human must correct the cause, then call retry-callback |
 | 24 | If share return fails at Alpaca the redeem request stays `pending` and retries instead of rejecting | Tokens are already burned; rejecting would lose the AP's value |
+| 27 | X-API-KEY enforced by one Issuer middleware (all but `/health`); callers get the key automatically from `lib/http.js` | Single place to enforce and change; AP and Alpaca never forget the header |
+| 28 | Alpaca endpoints are NOT key-protected | Assignment only asks for the Issuer's endpoints |
+| 29 | `Idempotency-Key` scoped per account, fingerprint of body, replay returns the live request, 409 on body mismatch, 503 not cached | Standard idempotency semantics; concurrent duplicates share one creation |
+| 30 | Live log is caller-side (each service records the calls it makes), pulled and merged by the AP | Keeps data ownership: no service writes into another; ring buffer is bounded |
+| 31 | Background polling flagged `quiet` and hidden by default | Otherwise the 1 s page polling drowns the business calls |
+| 32 | Account connect called by Alpaca at startup with retry; seeded AP stays pre-registered so the endpoint is a no-op for it | Assignment allows either; startup order is concurrent so retry needed |
 
 ## Reviewed / rejected while building
 - First reservation idea (check after fetching tokens, set later) had an await gap; restructured so check and `requests.set` are synchronous.
@@ -38,6 +44,9 @@
 - Considered auto-refunding tokens (re-minting) on permanent callback failure: rejected, would change token supply from a failure path; keep the record and let an operator retry.
 - Redeem: considered burning inside the transfer call; rejected, kept as a separate async step so a failure between transfer and burn is representable and recoverable.
 - Test bug found and fixed: a rejection from a foreign wallet is correctly absent from the AP's redemption history; assertion now skips that case.
+
+- Considered per-service log push to the AP: rejected, AP pull keeps services independent. Considered hiding the key inside each handler: rejected for one middleware.
+- Bug caught by the first run: log `from` names were auto-capitalised to "Ap"; replaced with an explicit name map.
 
 ## Open items
 - Verify exact Alpaca payload field names against the AP and Issuer guides (still not done; Phase 2 used my best recollection).

@@ -20,7 +20,7 @@ Failures at any step -> status `rejected` with `reason`, shown in UI. Shares onl
 3. Issuer -> Alpaca `POST .../callback/redeem` (carries tx hash)
 4. Alpaca moves shares Issuer -> AP, marks request `completed`
 
-## Phase 4 - Hardening and extras
+## Phase 4 - Hardening and extras (DONE: all optional extras implemented)
 X-API-KEY on Issuer, Idempotency-Key on mint, idempotent confirm, step delays, live cross-service log on the page, e2e tests, final README + prompt log + "changed/rejected" note.
 
 ## Invariants to test

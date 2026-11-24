@@ -6,7 +6,7 @@ Node.js/Express services talking over real HTTP. Assignment PDF is in the repo r
 ## Commands
 - `npm install` - once
 - `npm start` - launches AP :3000, Alpaca :4000, Issuer :5000 (Ctrl+C stops all)
-- `npm test` - starts everything, runs 29 checks (reads, mint, redeem, both flows together, rejections, callback failures, idempotency, conservation) over HTTP, stops everything
+- `npm test` - starts everything, runs 33 checks (reads, mint, redeem, both flows together, rejections, callback failures, idempotency, conservation) over HTTP, stops everything
 - `npm run start:ap|start:alpaca|start:issuer` - run one service alone
 
 ## Architecture rules (do not break)
@@ -39,6 +39,13 @@ Permanent callback failure (Alpaca 4xx): Issuer sets `status=callback_failed`, `
 Duplicate transfers: `client_ref` is required on `/tokenization/transfers` (registered synchronously; same key+params = replay, different params = 409).
 Fault hooks: Issuer `drop_redeem_callback`; Alpaca `POST /admin/faults {fail_redeem_callback, lose_redeem_response, reject_redeem_callback}`.
 
+## Optional extras (implemented, Phase 4)
+- **X-API-KEY**: Issuer middleware (all but `/health`); key in `config.js` (`ISSUER_API_KEY`); `lib/http.js` `call()` attaches it to any URL on the Issuer port. New Issuer callers need nothing extra; raw curl/fetch must send the header.
+- **Idempotency-Key** on Alpaca mint: `createMint()` returns `{status, body}`; route claims `idempotency` Map entry synchronously per `accountId:key` (fingerprint of body; mismatch 409; 503 not cached). AP sends a fresh key per click.
+- **Live log**: `lib/http.js` ring buffer (300) -> `GET /logs` on Alpaca/Issuer -> AP `GET /api/logs` merges; `quiet:true` marks background polling (hidden unless `?polling=1`).
+- **Account connect**: Issuer `POST /tokenization/accounts/connect` (idempotent); Alpaca calls it in `linkWithIssuer()` at startup.
+- Mint confirm idempotency and step delay (`STEP_DELAY_MS`) were already in place.
+
 ## Failure handling
 - Alpaca reconciler (every RETRY_MS/2) resumes pending requests idle >= RETRY_MS; Issuer retries undelivered callbacks. Peers are idempotent on `tokenization_request_id`, so retries cannot double-move shares or double-credit tokens.
 - Test fault injection: Issuer `POST /admin/faults {fail_confirm:n, drop_callback:n}`.
@@ -55,7 +62,7 @@ AP account `ap-account-001`: 10 AAPL, 5 TSLA. Issuer custody `xstocks-custody-00
 Issuer `xstocks`: AAPLx, TSLAx on solana. AP `ap-001` registered with one whitelisted wallet (see config.js).
 
 ## Status
-Phases 1-3 done (bootstrap, mint, redeem), 29/29 tests pass. Next: Phase 4 extras (X-API-KEY, Idempotency-Key on mint, live log, /accounts/connect), verify payloads vs real guides, final deliverables.
+All phases done (bootstrap, mint, redeem, hardening, optional extras), 33/33 tests pass. Remaining deliverables outside the code: verify payloads vs real Alpaca guides, prompt log, final changed/rejected note, add interviewer as collaborator, make repo private.
 Quantities are strings in JSON, BigInt units in memory.
 
 ## Verify after every change

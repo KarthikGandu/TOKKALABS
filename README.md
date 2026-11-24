@@ -3,13 +3,13 @@
 Simulation of Alpaca's Instant Tokenization Network as three independent
 Node.js + Express services using real HTTP calls and in-memory state.
 
-> **Status: Phases 1-3 done (mint + redeem).** Both flows work end to end with validation, rejections and failure recovery. Optional extras (X-API-KEY, Idempotency-Key, live log) are not built yet.
+> **Status: complete, including all optional extras.** Mint and redeem work end to end with validation, rejections and failure recovery. Extras: `X-API-KEY` on the Issuer, `Idempotency-Key` on mint, idempotent mint confirmations, step delays, live log on the page, and account connect at startup.
 
 ## Run
 ```bash
 npm install
 npm start      # AP http://localhost:3000, Alpaca :4000, Issuer :5000 (Ctrl+C stops)
-npm test       # starts all services, runs 29 end-to-end checks, stops them
+npm test       # starts all services, runs 33 end-to-end checks, stops them
 ```
 Requires Node 18+ (uses built-in `fetch`).
 
@@ -37,14 +37,14 @@ flowchart LR
     ISN -->|"callbacks for mint and redeem"| ALN
 ```
 
-Three separate processes talking only over HTTP. Each service keeps its own in-memory data and never reads another's.
+Three separate processes talking only over HTTP. The Issuer requires a static `X-API-KEY` on every endpoint except `/health`. Each service keeps its own in-memory data and never reads another's.
 | Service | Port | Owns | Phase 1 endpoints |
 |---|---|---|---|
-| AP | 3000 | nothing (UI + client) | `GET /`, `/api/config`, `/api/balances`, `/api/requests`, `POST /api/mint`, `POST /api/redeem`, `GET /api/redemptions` |
-| Alpaca | 4000 | share positions, request statuses | `GET /v1/accounts/:id`, `.../positions`, `POST .../tokenization/mint`, `GET .../tokenization/requests[/:rid]`, `POST .../tokenization/callback/mint`, `POST .../tokenization/callback/redeem`, test hook `POST /admin/faults` |
-| Issuer | 5000 | token ledger, AP registry, redemption wallet, mint records | `GET /tokenization/tokens`, `POST /tokenization/mint`, `POST /tokenization/mint/confirm`, own-design `POST /tokenization/transfers`, `GET /tokenization/redemptions[/:id]`, `POST /tokenization/redemptions/:id/retry-callback`, plus reads `/tokenization/{issuer,aps/:id,wallets/:addr/balances,supply,mint/:id}` and test hook `POST /admin/faults` |
+| AP | 3000 | nothing (UI + client) | `GET /`, `/api/config`, `/api/balances`, `/api/requests`, `POST /api/mint`, `POST /api/redeem`, `GET /api/redemptions`, `GET /api/logs` |
+| Alpaca | 4000 | share positions, request statuses | `GET /v1/accounts/:id`, `.../positions`, `GET /logs`, `POST .../tokenization/mint` (Idempotency-Key), `GET .../tokenization/requests[/:rid]`, `POST .../tokenization/callback/mint`, `POST .../tokenization/callback/redeem`, test hook `POST /admin/faults` |
+| Issuer | 5000 | token ledger, AP registry, redemption wallet, mint records | `GET /tokenization/tokens`, `POST /tokenization/accounts/connect`, `GET /logs`, `POST /tokenization/mint`, `POST /tokenization/mint/confirm`, own-design `POST /tokenization/transfers`, `GET /tokenization/redemptions[/:id]`, `POST /tokenization/redemptions/:id/retry-callback`, plus reads `/tokenization/{issuer,aps/:id,wallets/:addr/balances,supply,mint/:id}` and test hook `POST /admin/faults` |
 
-Every service also exposes `GET /health`.
+Every service also exposes `GET /health`. All Issuer endpoints except `/health` need `X-API-KEY`.
 
 ## Mint flow
 ```mermaid
@@ -140,6 +140,16 @@ stateDiagram-v2
     notified --> [*]
 ```
 
+## Optional extras (all implemented)
+| Extra | How it works | Where it is tested |
+|---|---|---|
+| **X-API-KEY on Issuer** | Static key (`issuer-secret-key`, override with env `ISSUER_API_KEY`) required on every Issuer endpoint except `GET /health`; missing or wrong key returns 401. Alpaca and the AP send it automatically (`lib/http.js` attaches it to calls aimed at the Issuer). | `X-API-KEY` check |
+| **Idempotency-Key on mint** | Optional header on Alpaca's mint endpoint, scoped per account. The key is claimed synchronously, so concurrent duplicates share one request. Same key + same body replays the original request (live status, header `Idempotent-Replay: true`); same key + different body returns 409; transient 503s are not cached. The AP page sends a fresh key per click. | `IDEMPOTENCY-KEY on mint` |
+| **Idempotent mint confirmation** | `POST /tokenization/mint/confirm` credits tokens once per `tokenization_request_id`; repeats return the original result and tx hash (credit is a synchronous check-and-credit). | `IDEMPOTENCY: repeated confirm...` |
+| **Step delay** | `STEP_DELAY_MS` (default 300 ms) between steps so `pending -> issuer_accepted -> shares_transferred -> confirm_sent -> completed` is visible; `RETRY_MS` (default 1000) sets retry cadence. | all flow tests (run at 50 ms) |
+| **Live log on the page** | Every cross-service call is recorded in a per-process ring buffer (`GET /logs` on Alpaca and Issuer). The AP merges them by time at `GET /api/logs` and the page shows them under "Live cross-service log" (background polling hidden unless ticked). | `LIVE LOG` |
+| **Account connect** | Issuer `POST /tokenization/accounts/connect` (idempotent). Alpaca calls it at startup for the AP's account (retrying while the Issuer boots): already linked returns 200 `already_connected`, a new account returns 201, a wallet already whitelisted for another AP returns 409. | `ACCOUNT CONNECT` |
+
 ## Seed data
 - Alpaca: AP account `ap-account-001` = 10 AAPL, 5 TSLA; Issuer custody `xstocks-custody-001` = 0 AAPL, 0 TSLA
 - Issuer `xstocks`: tokens AAPLx, TSLAx on `solana`; AP `ap-001` registered with one whitelisted wallet; redemption wallet exists
@@ -150,11 +160,13 @@ stateDiagram-v2
 - Mint request/payload field names (`underlying_symbol`, `token_symbol`, `qty`, `network`, `wallet_address`, `issuer_id`, `account_id`) are from memory of the guides, NOT yet verified against them.
 - Redeem: Alpaca creates the redeem request when the Issuer's callback arrives (so it is not visible at Alpaca before the burn); Alpaca generates its own `tokenization_request_id` and dedupes on the Issuer's `issuer_request_id`. This and the callback payload are my design, unverified against the guides.
 - Validation rejections return HTTP 422 with the stored request (status `rejected`) instead of a bare error, so the AP history shows them.
+- The Issuer API key is a static shared secret in `config.js` (a simulation, not real auth); `/logs` and `/admin/faults` sit behind the same key. Alpaca's own endpoints are not key-protected.
 - Env `STEP_DELAY_MS` (300) / `RETRY_MS` (1000) control visible transitions and retry cadence.
 - Alpaca response shapes for accounts/positions are simplified from the real Trading API.
 - Details: `notes/decisions.md`. Plan: `notes/plan.md`. Log: `notes/progress.md`.
 
 ## One-command demo (no extra terminals)
 ```bash
-npm run demo   # starts the stack, runs mint, redeem, rejections and a callback failure, prints each step, stops
+npm run demo   # starts the stack, runs mint, redeem, rejections, failure recovery and the extras, prints each step, stops
 ```
+For the live log in the browser run `npm start`, open http://localhost:3000, press Mint or Redeem and watch the "Live cross-service log" panel.
