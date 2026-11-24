@@ -16,24 +16,25 @@ Requires Node 18+ (uses built-in `fetch`).
 ## Architecture
 ```mermaid
 flowchart LR
-    U([Browser]) -->|"HTML + /api/*"| AP
+    U([Browser])
 
-    subgraph AP["AP  (localhost:3000)  owns no balances"]
-        APUI["Web page<br/>Mint / Redeem / history"]
+    subgraph APS["AP - localhost:3000"]
+        APN["Web page and backend<br/>owns no balances"]
     end
 
-    subgraph AL["Alpaca  (localhost:4000)"]
-        ALD[("Owns:<br/>share positions<br/>request statuses")]
+    subgraph ALS["Alpaca - localhost:4000"]
+        ALN["Owns share positions<br/>and request statuses"]
     end
 
-    subgraph IS["Issuer xstocks  (localhost:5000)"]
-        ISD[("Owns:<br/>token ledger, AP registry<br/>whitelisted wallets<br/>redemption wallet, tx hashes")]
+    subgraph ISS["Issuer xstocks - localhost:5000"]
+        ISN["Owns token ledger, AP registry,<br/>whitelisted wallets,<br/>redemption wallet, tx hashes"]
     end
 
-    AP -->|"mint, request lookup,<br/>share balances"| AL
-    AP -->|"token balances,<br/>transfer to redemption wallet"| IS
-    AL -->|"tokens list, mint, mint/confirm"| IS
-    IS -->|"callback/mint, callback/redeem"| AL
+    U -->|"HTML and api calls"| APN
+    APN -->|"mint, request lookup, share balances"| ALN
+    APN -->|"token balances, transfer to redemption wallet"| ISN
+    ALN -->|"tokens list, mint, mint confirm"| ISN
+    ISN -->|"callbacks for mint and redeem"| ALN
 ```
 
 Three separate processes talking only over HTTP. Each service keeps its own in-memory data and never reads another's.
