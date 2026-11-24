@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { PORTS, URLS, IDS } = require('../../config');
 const D = require('../../lib/decimal');
-const { call, sleep } = require('../../lib/http');
+const { call, sleep, recent } = require('../../lib/http');
 
 const STEP_DELAY = Number(process.env.STEP_DELAY_MS ?? 300);
 const RETRY_MS = Number(process.env.RETRY_MS ?? 1000);
@@ -108,6 +108,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_req, res) => res.json({ service: 'alpaca', status: 'ok' }));
+app.get('/logs', (_req, res) => res.json(recent())); // cross-service calls made by Alpaca (live log)
 
 app.get('/v1/accounts/:account_id', (req, res) => {
   const a = accounts.get(req.params.account_id);
@@ -121,11 +122,8 @@ app.get('/v1/accounts/:account_id/positions', (req, res) => {
   res.json(toPositions(a));
 });
 
-// AP-facing: create a mint request
-app.post('/v1/accounts/:account_id/tokenization/mint', async (req, res) => {
-  const accountId = req.params.account_id;
-  if (!accounts.has(accountId)) return res.status(404).json({ message: 'account not found' });
-  const b = req.body || {};
+// Creates a mint request. Returns { status, body } so the route can wrap it with Idempotency-Key handling.
+async function createMint(accountId, b) {
   const underlying = b.underlying_symbol;
   const r = {
     tokenization_request_id: crypto.randomUUID(), type: 'mint', status: 'pending', step: 'submitted',
@@ -139,7 +137,7 @@ app.post('/v1/accounts/:account_id/tokenization/mint', async (req, res) => {
     requests.set(r.tokenization_request_id, r);
     r.status = 'rejected'; r.step = 'rejected_at_validation'; r.reason = reason;
     event(r, `REJECTED at validation: ${reason}`);
-    return res.status(422).json(r);
+    return { status: 422, body: r };
   };
 
   // 1. synchronous input validation
@@ -157,7 +155,7 @@ app.post('/v1/accounts/:account_id/tokenization/mint', async (req, res) => {
     if (!t.ok) throw new Error(`status ${t.status}`);
     tokens = t.body;
   } catch (e) {
-    return res.status(503).json({ message: `issuer unavailable: ${e.message}` });
+    return { status: 503, body: { message: `issuer unavailable: ${e.message}` } };
   }
   // From here to requests.set() there is no await, so the share check and the
   // reservation are atomic (two concurrent mints cannot both spend the same shares).
@@ -173,7 +171,33 @@ app.post('/v1/accounts/:account_id/tokenization/mint', async (req, res) => {
   requests.set(r.tokenization_request_id, r);
   event(r, `accepted: validated ${r.qty} ${underlying} (${r.token_symbol} on ${r.network})`);
   setImmediate(() => advance(r.tokenization_request_id));
-  res.status(200).json(r);
+  return { status: 200, body: r };
+}
+
+// Idempotency-Key -> { fingerprint, promise }, scoped per account. The entry is claimed
+// synchronously, so concurrent duplicates await the same creation instead of creating twice.
+const idempotency = new Map();
+
+// AP-facing: create a mint request (optional Idempotency-Key header)
+app.post('/v1/accounts/:account_id/tokenization/mint', async (req, res) => {
+  const accountId = req.params.account_id;
+  if (!accounts.has(accountId)) return res.status(404).json({ message: 'account not found' });
+  const b = req.body || {};
+  try {
+    const key = req.get('Idempotency-Key');
+    if (!key) { const out = await createMint(accountId, b); return res.status(out.status).json(out.body); }
+    const id = `${accountId}:${key}`;
+    const fingerprint = JSON.stringify([b.underlying_symbol, String(b.qty), b.token_symbol, b.network, b.wallet_address, b.issuer_id]);
+    let entry = idempotency.get(id);
+    if (entry && entry.fingerprint !== fingerprint) return res.status(409).json({ message: 'Idempotency-Key reused with a different request body' });
+    const replay = !!entry;
+    if (!entry) { entry = { fingerprint, promise: createMint(accountId, b) }; idempotency.set(id, entry); }
+    const out = await entry.promise;
+    if (out.status === 503) idempotency.delete(id); // transient: the client may retry with the same key
+    res.set('Idempotent-Replay', String(replay)).status(out.status).json(out.body);
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
 });
 
 app.get('/v1/accounts/:account_id/tokenization/requests', (req, res) => {
@@ -240,8 +264,21 @@ app.post('/admin/faults', (req, res) => {
   res.json(faults);
 });
 
+// Startup step: link the AP's account with the Issuer (POST /tokenization/accounts/connect).
+// Retries because the services start concurrently. Idempotent on the Issuer side.
+async function linkWithIssuer() {
+  for (let i = 0; i < 40; i++) {
+    try {
+      const r = await call('alpaca', 'POST', `${URLS.issuer}/tokenization/accounts/connect`, { account_id: IDS.AP_ACCOUNT, wallet_address: IDS.AP_WALLET });
+      if (r.ok) return console.log(`[alpaca] account link with issuer: ${r.body.status}`);
+    } catch { /* issuer not up yet */ }
+    await sleep(250);
+  }
+  console.log('[alpaca] WARNING: could not link account with issuer');
+}
+
 if (require.main === module) {
-  app.listen(PORTS.alpaca, () => console.log(`[alpaca] listening on :${PORTS.alpaca}`));
+  app.listen(PORTS.alpaca, () => { console.log(`[alpaca] listening on :${PORTS.alpaca}`); linkWithIssuer(); });
   // Reconciler: resume any request stuck mid-flow (peer was down, call failed).
   setInterval(() => {
     for (const r of requests.values())
